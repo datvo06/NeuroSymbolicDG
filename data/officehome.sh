@@ -1,0 +1,5 @@
+mkdir -p data/officehome
+cd data/officehome
+gdown 1FM7FAU8Q_CZaXnK95U4CEn52mEHFtNnm
+unzip OfficeHomeDataset_10072016.zip 
+mv OfficeHomeDataset_10072016 OfficeHome
