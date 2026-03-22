@@ -2,7 +2,7 @@
 name = "neurosymbolic-da"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["effectful>=0.3.1", "torch>=2.0"]
+dependencies = ["effectful>=0.3.1", "torch>=2.0", "torchvision>=0.15", "kornia>=0.7", "scipy>=1.11"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -10,6 +10,9 @@ dev = ["pytest>=8.0"]
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["neurosymbolic_da*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

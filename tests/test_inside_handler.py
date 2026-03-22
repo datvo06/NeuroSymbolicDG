@@ -9,8 +9,8 @@ from neurosymbolic_da.dsl.handlers.inside import (
     get_class_score,
     make_inside_handler,
 )
-from neurosymbolic_da.dsl.ops import choice, conj, has, rel, score
-from neurosymbolic_da.dsl.primitives import Primitive
+from neurosymbolic_da.dsl.ops import choice, conj, group_rel, has, rel, score
+from neurosymbolic_da.dsl.primitives import Primitive, SubLayout, aggregate
 from neurosymbolic_da.dsl.relations import RelationParams
 
 
@@ -140,3 +140,75 @@ def test_gradient_flow_inside():
     if result.item() > 0:
         result.backward()
         assert env[0].cy.grad is not None
+
+
+# --- Tests for SubLayout / aggregate / group_rel ---
+
+
+def test_aggregate_centroid():
+    """Aggregate centroid is confidence-weighted mean."""
+    env = _make_env(3)
+    sub = aggregate(env, frozenset({0, 1}))
+    assert isinstance(sub, SubLayout)
+    assert sub.members == frozenset({0, 1})
+    # Confidence-weighted mean of (0.2, 0.2) w=0.9 and (0.8, 0.2) w=0.8
+    expected_cx = (0.9 * 0.2 + 0.8 * 0.8) / (0.9 + 0.8)
+    assert torch.isclose(sub.cx, torch.tensor(expected_cx), atol=1e-5)
+
+
+def test_aggregate_bbox():
+    """Aggregate bbox is enclosing box."""
+    env = _make_env(3)
+    sub = aggregate(env, frozenset({0, 2}))
+    # prim 0: x1=0.1, prim 2: x1=0.4 → min=0.1
+    # prim 0: x2=0.3, prim 2: x2=0.6 → max=0.6
+    assert sub.x1.item() < sub.x2.item()
+    assert sub.y1.item() < sub.y2.item()
+
+
+def test_aggregate_conf():
+    """Aggregate confidence is sum of member confidences."""
+    env = _make_env(3)
+    sub = aggregate(env, frozenset({0, 1}))
+    assert torch.isclose(sub.conf, torch.tensor(0.9 + 0.8))
+
+
+def test_group_rel_inside_handler():
+    """group_rel produces inside table entries with group-level relation scores."""
+    env = _make_env(3)
+    params = RelationParams()
+
+    with handler(make_inside_handler(env, params)):
+        # Build two sublayout tables
+        t1 = conj(has(0), has(1))  # {0,1} -> 0.9 * 0.8
+        t2 = has(2)               # {2} -> 0.7
+        # Group-level relation: above(group{0,1}, group{2})
+        table = group_rel("above", t1, t2)
+
+    # Should produce {0,1,2} entry
+    full = frozenset({0, 1, 2})
+    assert full in table
+    assert table[full].item() > 0
+
+
+def test_group_rel_gradient_flow():
+    """Verify gradients flow through group_rel."""
+    env = _make_env(3)
+    for p in env.values():
+        p.cx = p.cx.clone().requires_grad_(True)
+        p.cy = p.cy.clone().requires_grad_(True)
+
+    params = RelationParams()
+
+    with handler(make_inside_handler(env, params)):
+        t1 = conj(has(0), has(1))
+        t2 = has(2)
+        table = group_rel("above", t1, t2)
+
+    result = get_class_score(table, 3)
+    result.backward()
+    # Gradient should flow to primitive positions (used in aggregate centroid)
+    assert env[0].cy.grad is not None
+    assert env[2].cy.grad is not None
+    # And to relation params
+    assert params.lambda_above.grad is not None

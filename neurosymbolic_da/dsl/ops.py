@@ -47,3 +47,14 @@ def choice(*alternatives: Tensor) -> Tensor:
 def score(weight: Tensor, body: Tensor) -> Tensor:
     """Weighted scoring — semiring multiplication by weight."""
     raise NotHandled
+
+
+@defop
+def group_rel(name: str, g1: Tensor, g2: Tensor) -> Tensor:
+    """Spatial relation between two SubLayouts (groups of primitives).
+
+    Under the inside handler, g1 and g2 are InsideTables.
+    The handler computes aggregate spatial features for each group
+    and evaluates the relation on the aggregates.
+    """
+    raise NotHandled

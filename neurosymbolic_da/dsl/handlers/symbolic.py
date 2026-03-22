@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from effectful.ops.types import Interpretation
 
-from neurosymbolic_da.dsl.ops import choice, conj, has, rel, score
+from neurosymbolic_da.dsl.ops import choice, conj, group_rel, has, rel, score
 
 
 @dataclass
@@ -46,10 +46,14 @@ def make_symbolic_handler() -> Interpretation:
     def _score(weight, body: DerivNode) -> DerivNode:
         return DerivNode(op="score", args=[weight], children=[body])
 
+    def _group_rel(name: str, g1: DerivNode, g2: DerivNode) -> DerivNode:
+        return DerivNode(op="group_rel", args=[name], children=[g1, g2])
+
     return {
         has: _has,
         rel: _rel,
         conj: _conj,
+        group_rel: _group_rel,
         choice: _choice,
         score: _score,
     }

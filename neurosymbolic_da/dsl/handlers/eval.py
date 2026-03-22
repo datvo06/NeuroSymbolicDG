@@ -8,7 +8,7 @@ from torch import Tensor
 
 from effectful.ops.types import Interpretation
 
-from neurosymbolic_da.dsl.ops import choice, conj, has, rel, score
+from neurosymbolic_da.dsl.ops import choice, conj, group_rel, has, rel, score
 from neurosymbolic_da.dsl.primitives import Env
 from neurosymbolic_da.dsl.relations import RelationParams, compute_relation
 
@@ -30,6 +30,12 @@ def make_eval_handler(env: Env, params: RelationParams) -> Interpretation:
     def _conj(c1: Tensor, c2: Tensor) -> Tensor:
         return c1 * c2
 
+    def _group_rel(name: str, g1: Tensor, g2: Tensor) -> Tensor:
+        # In eval mode, group_rel is just conj — the relation is already
+        # folded into the group scores. This is a simplification; the
+        # proper hierarchical evaluation uses the inside handler.
+        return g1 * g2
+
     def _choice(*alternatives: Tensor) -> Tensor:
         return sum(alternatives)  # type: ignore[return-value]
 
@@ -40,6 +46,7 @@ def make_eval_handler(env: Env, params: RelationParams) -> Interpretation:
         has: _has,
         rel: _rel,
         conj: _conj,
+        group_rel: _group_rel,
         choice: _choice,
         score: _score,
     }
