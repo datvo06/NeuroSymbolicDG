@@ -1,7 +1,10 @@
 # Neuro-Symbolic Domain Generalization via Compositional Layout Grammars
 
-Abstract: A neuro-symbolic framework for domain generalization that factors visual recognition into **domain-invariant structural programs** (how parts compose into wholes via a PCFG grammar) and **domain-specific primitive detectors** (what parts look like). The grammar's compositional spatial reasoning is inherently domain-invariant, enabling strong generalization without explicit alignment losses.
+<img src="assets/thumbnail.png" alt="PCFG grammar over spatial layout DSL" width="600">
 
+A neuro-symbolic framework for domain generalization that factors visual recognition into **domain-invariant structural programs** (how parts compose into wholes via a PCFG grammar) and **domain-specific primitive detectors** (what parts look like). The grammar's compositional spatial reasoning is inherently domain-invariant, enabling strong generalization without explicit alignment losses.
+
+**Blog post:** [Grammars that generalize](https://datvo06.github.io/blog/2026/neurosymbolic-dg/)
 
 ## Setup
 
