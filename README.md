@@ -1,42 +1,7 @@
 # Neuro-Symbolic Domain Generalization via Compositional Layout Grammars
 
-A neuro-symbolic framework for domain generalization that factors visual recognition into **domain-invariant structural programs** (how parts compose into wholes via a PCFG grammar) and **domain-specific primitive detectors** (what parts look like). The grammar's compositional spatial reasoning is inherently domain-invariant, enabling strong generalization without explicit alignment losses.
+Abstract: A neuro-symbolic framework for domain generalization that factors visual recognition into **domain-invariant structural programs** (how parts compose into wholes via a PCFG grammar) and **domain-specific primitive detectors** (what parts look like). The grammar's compositional spatial reasoning is inherently domain-invariant, enabling strong generalization without explicit alignment losses.
 
-## Key Results on CUB-DG
-
-CUB-DG is a fine-grained bird recognition benchmark with 200 species across 4 visual domains (Photo, Art, Cartoon, Paint). Our PCFG grammar captures compositional bird structure (head, beak, wing, tail + spatial relations) that transfers across domains.
-
-**Best result: PCFG+CDAN (DG protocol) -- 67.0% avg (3 targets)**
-
-| Method | Art | Cartoon | Paint | Avg | Notes |
-|--------|-----|---------|-------|-----|-------|
-| ERM (published) | 37.4 | 53.2 | 29.0 | 39.9 | GVRT baseline |
-| CORAL | 50.3 | 63.5 | 35.8 | 49.9 | Image-only SOTA |
-| CITGM | 54.0 | 65.5 | 41.4 | 53.6 | Image+Text SOTA |
-| NoPCFG+CDAN (ours) | 52.4 | 56.2 | 45.7 | 51.4 | Ablation: no grammar |
-| **PCFG+CDAN (ours)** | **68.8** | **71.8** | **60.5** | **67.0** | **Image only, no text** |
-
-**Grammar advantage: +15.6pp** over the NoPCFG ablation (same backbone, same data, same adaptation). The grammar IS the domain invariance mechanism.
-
-### Negative Results (All Hurt vs ERM Baseline)
-
-| Method | Avg Delta | Finding |
-|--------|-----------|---------|
-| DG-Adversarial | -5.5pp | Adversarial alignment disrupts grammar's natural invariance |
-| Depth-2 grammar | -4.2pp | Hierarchical structure overfits to source domains |
-| Production alignment | -12.9pp | Explicit alignment is redundant with grammar invariance |
-
-## Architecture
-
-```
-Input image
-  -> ResNet-50 backbone (pretrained, fine-tuned)
-  -> Concept Bottleneck (1x1 conv -> k spatial heatmaps -> soft-argmax -> primitives)
-  -> PCFG Grammar (344 productions: 8 has + 6x56 rel -> per-class weighted sum)
-  -> log-softmax classification
-```
-
-The grammar scores each class by computing weighted spatial relations between detected primitives. Sparsemax normalization ensures each class uses only a few active productions, yielding interpretable derivation trees.
 
 ## Setup
 
@@ -50,17 +15,18 @@ uv pip install -e ".[dev]"
 pip install -e ".[dev]"
 ```
 
-Dependencies: `effectful`, `torch`, `torchvision`, `kornia`.
+Dependencies: `effectful`, `torch`, `torchvision`, `kornia`, `gdown`.
 
-## Download CUB-DG Data
-
+## Data
+We provide scripts for downloading all data at once: 
 ```bash
-# CUB-DG dataset (from HuggingFace)
-pip install huggingface_hub
-python -c "
-from huggingface_hub import snapshot_download
-snapshot_download('datvo06/CUB-DG', local_dir='./data/cub/CUB-DG', repo_type='dataset')
-"
+bash data/get_all_data.sh
+```
+
+Or download each dataset individually:
+```bash
+# For example download the CUB-DG dataset:
+bash data/cubdg.sh
 ```
 
 ## Reproducing Main Results
@@ -240,6 +206,11 @@ print(f'Target {target}: {acc:.1%}')
 ## Project Structure
 
 ```
+data/
+  cub/
+  officehome/
+  pacs/
+  vlcs/
 neurosymbolic_da/
   dsl/                    # Layout DSL (effectful algebraic effects)
     ops.py                # 5 DSL operations: has, rel, conj, choice, score
