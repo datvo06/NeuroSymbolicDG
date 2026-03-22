@@ -288,11 +288,6 @@ uv run pytest -v
 
 All experiments run on a single NVIDIA A40 GPU (46GB). DG-ERM training: ~4 hours (50 epochs). CDAN adaptation: ~90 min (20 epochs).
 
-## Authors
-
-- **Dat Nguyen**
-- **Duy Nguyen**
-
 ## Citation
 
 If you use this code, please cite:
