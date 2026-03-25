@@ -1,25 +1,10 @@
-#!/usr/bin/env python3
-"""CDAN adaptation for DG checkpoints (multi-source → target).
-
-Loads a DG-trained checkpoint (trained on 3 combined source domains),
-freezes grammar + relation params, and adapts backbone + bottleneck
-using CDAN with combined source domains as reference.
-
-Usage:
-    python scripts/adapt_cdan_dg.py \
-        --checkpoint checkpoints/dg_erm_v2_pcfg_cubdg_Art.pt \
-        --dataset cubdg --target Art \
-        --data-root ./data/cub/CUB-DG --backbone resnet50 --n-primitives 8 \
-        --use-sparsemax --epochs 20 --lr 1e-4 --lambda-adv 1.0
-"""
-
 import argparse
 import math
 import time
 
 import torch
 import torch.nn as nn
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import ConcatDataset, DataLoader
 
@@ -38,8 +23,10 @@ from neurosymbolic_da.training.trainer import evaluate
 DATASET_DOMAINS = {
     "cubdg": ["Photo", "Art", "Cartoon", "Paint"],
     "pacs": ["photo", "art_painting", "cartoon", "sketch"],
+    "vlcs": ["CALTECH", "LABELME", "PASCAL", "SUN"],
+    "terrainc": ["location_38", "location_43", "location_46", "location_100"],
+    "domainnet": ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"],
 }
-
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -57,6 +44,15 @@ def _get_domain_dataset(dataset, data_root, domain, train=True, **kwargs):
     elif dataset == "pacs":
         from neurosymbolic_da.data.pacs import get_pacs
         return get_pacs(data_root, domain, train=train, **kwargs)
+    elif dataset == "vlcs":
+        from neurosymbolic_da.data.vlcs import get_vlcs
+        return get_vlcs(data_root, domain, train=train, **kwargs)
+    elif dataset == "terrainc":
+        from neurosymbolic_da.data.terrainc import get_terra
+        return get_terra(data_root, domain, train=train, **kwargs)
+    elif dataset == "domainnet":
+        from neurosymbolic_da.data.domainnet import get_domainnet
+        return get_domainnet(data_root, domain, train=train, **kwargs)        
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
 
@@ -219,7 +215,7 @@ def main():
     print(f"Device: {device}")
 
     n_classes = get_n_classes(args.dataset)
-    source_domains = [d for d in CUBDG_DOMAINS if d != args.target]
+    source_domains = [d for d in DATASET_DOMAINS[args.dataset] if d != args.target]
     print(f"DG CDAN: sources={source_domains} -> target={args.target}")
 
     # Load data
@@ -274,8 +270,8 @@ def main():
     print(f"Align: {args.align_level} ({feat_dim}-dim), CDAN cond_dim={cond_dim}")
 
     # Optimizers
-    optimizer_feat = Adam(adaptable_params, lr=args.lr)
-    optimizer_disc = Adam(discriminator.parameters(), lr=args.lr_disc)
+    optimizer_feat = AdamW(adaptable_params, lr=args.lr)
+    optimizer_disc = AdamW(discriminator.parameters(), lr=args.lr_disc)
     scheduler_feat = CosineAnnealingLR(optimizer_feat, T_max=args.epochs)
     scheduler_disc = CosineAnnealingLR(optimizer_disc, T_max=args.epochs)
 

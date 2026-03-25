@@ -21,6 +21,12 @@ def get_n_classes(dataset: str) -> int:
             return 200
         case "pacs":
             return 7
+        case "vlcs":
+            return 5
+        case "terrainc":
+            return 10
+        case "domainnet":
+            return 345
         case _:
             raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -99,9 +105,21 @@ def get_loaders(
             strong_aug=strong_aug,
             randaugment=randaugment,
         )
-    else:
-        from neurosymbolic_da.data.office import get_office_loaders
 
+    elif dataset == "vlcs":
+        from neurosymbolic_da.data.vlcs import get_vlcs_loaders
+
+        return get_vlcs_loaders(
+            root=data_root,
+            source=source,
+            target=target,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            strong_aug=strong_aug,
+            randaugment=randaugment,
+        )
+    elif dataset == "officehome":
+        from neurosymbolic_da.data.office import get_office_loaders
         return get_office_loaders(
             dataset, data_root, source, target,
             batch_size=batch_size,
@@ -109,3 +127,23 @@ def get_loaders(
             strong_aug=strong_aug,
             randaugment=randaugment,
         )
+    elif dataset == "terrainc": 
+        from neurosymbolic_da.data.terrainc import get_terra_loaders
+        return get_terra_loaders(
+            dataset, data_root, source, target,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            strong_aug=strong_aug,
+            randaugment=randaugment,
+        ) 
+    elif dataset == "domainnet": 
+        from neurosymbolic_da.data.domainnet import get_domainnet_loaders
+        return get_domainnet_loaders(
+            dataset, data_root, source, target,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            strong_aug=strong_aug,
+            randaugment=randaugment,
+        )     
+    else: 
+        return f"Not implemented dataset {dataset}"

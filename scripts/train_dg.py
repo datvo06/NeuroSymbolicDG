@@ -41,6 +41,9 @@ from neurosymbolic_da.training.trainer import train, evaluate
 DATASET_DOMAINS = {
     "cubdg": ["Photo", "Art", "Cartoon", "Paint"],
     "pacs": ["photo", "art_painting", "cartoon", "sketch"],
+    "vlcs": ["CALTECH", "LABELME", "PASCAL", "SUN"],
+    "terrainc": ["location_38", "location_43", "location_46", "location_100"],
+    "domainnet": ["clipart", "infograph", "painting", "quickdraw", "real", "sketch"],
 }
 
 
@@ -123,6 +126,82 @@ def get_dg_loaders(
             DataLoader(combined_val, shuffle=False, **kwargs),
             DataLoader(tgt_test, shuffle=False, **kwargs),
         )
+
+    elif dataset == "vlcs":
+        from neurosymbolic_da.data.vlcs import get_vlcs
+
+        src_train_datasets = []
+        src_val_datasets = []
+        for domain in source_domains:
+            src_train_datasets.append(
+                get_vlcs(data_root, domain, train=True, image_size=image_size,
+                         strong_aug=strong_aug, randaugment=randaugment)
+            )
+            src_val_datasets.append(
+                get_vlcs(data_root, domain, train=False, image_size=image_size)
+            )
+
+        combined_train = ConcatDataset(src_train_datasets)
+        combined_val = ConcatDataset(src_val_datasets)
+
+        tgt_test = get_vlcs(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            DataLoader(combined_train, shuffle=True, **kwargs),
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
+    elif dataset == "terrainc":
+        from neurosymbolic_da.data.terrainc import get_terra
+
+        src_train_datasets = []
+        src_val_datasets = []
+        for domain in source_domains:
+            src_train_datasets.append(
+                get_terra(data_root, domain, train=True, image_size=image_size,
+                         strong_aug=strong_aug, randaugment=randaugment)
+            )
+            src_val_datasets.append(
+                get_terra(data_root, domain, train=False, image_size=image_size)
+            )
+
+        combined_train = ConcatDataset(src_train_datasets)
+        combined_val = ConcatDataset(src_val_datasets)
+
+        tgt_test = get_terra(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            DataLoader(combined_train, shuffle=True, **kwargs),
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
+    elif dataset == "domainnet":
+        from neurosymbolic_da.data.domainnet import get_domainnet
+
+        src_train_datasets = []
+        src_val_datasets = []
+        for domain in source_domains:
+            src_train_datasets.append(
+                get_domainnet(data_root, domain, train=True, image_size=image_size,
+                         strong_aug=strong_aug, randaugment=randaugment)
+            )
+            src_val_datasets.append(
+                get_domainnet(data_root, domain, train=False, image_size=image_size)
+            )
+
+        combined_train = ConcatDataset(src_train_datasets)
+        combined_val = ConcatDataset(src_val_datasets)
+
+        tgt_test = get_domainnet(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            DataLoader(combined_train, shuffle=True, **kwargs),
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
     else:
         raise ValueError(f"DG protocol not implemented for dataset: {dataset}")
 
@@ -194,6 +273,90 @@ def get_dg_per_domain_loaders(
 
         combined_val = ConcatDataset(val_datasets)
         tgt_test = get_pacs(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            domain_train_loaders,
+            source_domains,
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
+    elif dataset == "vlcs":
+        from neurosymbolic_da.data.vlcs import get_vlcs
+
+        domain_train_loaders = []
+        val_datasets = []
+        for domain in source_domains:
+            train_ds = get_vlcs(data_root, domain, train=True,
+                                image_size=image_size, strong_aug=strong_aug,
+                                randaugment=randaugment)
+            val_ds = get_vlcs(data_root, domain, train=False,
+                              image_size=image_size)
+            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                          pin_memory=True)
+            domain_train_loaders.append(
+                DataLoader(train_ds, shuffle=True, **kwargs)
+            )
+            val_datasets.append(val_ds)
+
+        combined_val = ConcatDataset(val_datasets)
+        tgt_test = get_vlcs(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            domain_train_loaders,
+            source_domains,
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
+    elif dataset == "terrainc":
+        from neurosymbolic_da.data.terrainc import get_terra
+
+        domain_train_loaders = []
+        val_datasets = []
+        for domain in source_domains:
+            train_ds = get_terra(data_root, domain, train=True,
+                                image_size=image_size, strong_aug=strong_aug,
+                                randaugment=randaugment)
+            val_ds = get_terra(data_root, domain, train=False,
+                              image_size=image_size)
+            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                          pin_memory=True)
+            domain_train_loaders.append(
+                DataLoader(train_ds, shuffle=True, **kwargs)
+            )
+            val_datasets.append(val_ds)
+
+        combined_val = ConcatDataset(val_datasets)
+        tgt_test = get_terra(data_root, target, train=False, image_size=image_size)
+
+        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return (
+            domain_train_loaders,
+            source_domains,
+            DataLoader(combined_val, shuffle=False, **kwargs),
+            DataLoader(tgt_test, shuffle=False, **kwargs),
+        )
+    elif dataset == "domainnet":
+        from neurosymbolic_da.data.domainnet import get_domainnet
+
+        domain_train_loaders = []
+        val_datasets = []
+        for domain in source_domains:
+            train_ds = get_domainnet(data_root, domain, train=True,
+                                image_size=image_size, strong_aug=strong_aug,
+                                randaugment=randaugment)
+            val_ds = get_domainnet(data_root, domain, train=False,
+                              image_size=image_size)
+            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
+                          pin_memory=True)
+            domain_train_loaders.append(
+                DataLoader(train_ds, shuffle=True, **kwargs)
+            )
+            val_datasets.append(val_ds)
+
+        combined_val = ConcatDataset(val_datasets)
+        tgt_test = get_domainnet(data_root, target, train=False, image_size=image_size)
 
         kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
         return (
