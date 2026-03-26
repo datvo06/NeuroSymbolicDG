@@ -1,27 +1,3 @@
-#!/usr/bin/env python3
-"""Domain Generalization training script — train on 3 domains, test on held-out target.
-
-Matches the leave-one-domain-out protocol used by CORAL, CITGM, etc. on CUB-DG.
-No target data is used at all (neither labeled nor unlabeled).
-
-Supports two modes:
-1. ERM (default): Simple concatenation of 3 source domain train sets
-2. Adversarial (--adversarial): 3-way domain alignment via DANN-style GRL
-   to learn domain-invariant features across source domains
-
-Usage:
-    # ERM baseline
-    python scripts/train_dg.py --dataset cubdg --target Art \
-        --data-root ./data/cub/CUB-DG --backbone resnet50 --n-primitives 8 \
-        --use-sparsemax --grammar-l1 0.01 --epochs 50 --batch-size 32 --lr 1e-3
-
-    # With 3-way adversarial alignment (like DANN in DG setting)
-    python scripts/train_dg.py --dataset cubdg --target Art \
-        --data-root ./data/cub/CUB-DG --backbone resnet50 --n-primitives 8 \
-        --use-sparsemax --grammar-l1 0.01 --epochs 50 --batch-size 32 --lr 1e-3 \
-        --adversarial --lambda-adv 1.0 --lr-disc 1e-3
-"""
-
 import argparse
 import math
 import time
@@ -35,6 +11,11 @@ from torch.utils.data import ConcatDataset, DataLoader
 from neurosymbolic_da.data.loader_utils import get_n_classes
 from neurosymbolic_da.nn.pipeline import NeuroSymbolicPipeline
 from neurosymbolic_da.training.trainer import train, evaluate
+
+# Enable cuDNN autotuner for fixed-size inputs (free 5-10% speedup)
+torch.backends.cudnn.benchmark = True
+# Enable TF32 for matmuls on Ampere+ GPUs (faster than fp32, same as AMP for matmuls)
+torch.set_float32_matmul_precision("high")
 
 
 # Domain lists per dataset
@@ -53,6 +34,41 @@ def get_device() -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _loader_kwargs(batch_size: int, num_workers: int, train: bool = False) -> dict:
+    """Common DataLoader kwargs with performance settings."""
+    # Cap workers: beyond ~16 workers, IPC overhead dominates and shm pressure
+    # causes bus errors. Benchmarked optimal at 16 on 128-core machine.
+    num_workers = min(num_workers, 16)
+    kw = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    if num_workers > 0:
+        kw["persistent_workers"] = True
+        kw["prefetch_factor"] = 3
+    if train:
+        kw["drop_last"] = True
+    return kw
+
+
+def _get_dataset_fn(dataset: str):
+    """Return the dataset getter function for the given dataset name."""
+    if dataset == "cubdg":
+        from neurosymbolic_da.data.cubdg import get_cubdg
+        return get_cubdg
+    elif dataset == "pacs":
+        from neurosymbolic_da.data.pacs import get_pacs
+        return get_pacs
+    elif dataset == "vlcs":
+        from neurosymbolic_da.data.vlcs import get_vlcs
+        return get_vlcs
+    elif dataset == "terrainc":
+        from neurosymbolic_da.data.terrainc import get_terra
+        return get_terra
+    elif dataset == "domainnet":
+        from neurosymbolic_da.data.domainnet import get_domainnet
+        return get_domainnet
+    else:
+        raise ValueError(f"DG protocol not implemented for dataset: {dataset}")
 
 
 def get_dg_loaders(
@@ -74,136 +90,30 @@ def get_dg_loaders(
     source_domains = [d for d in domains if d != target]
     print(f"Source domains: {source_domains}, Target domain: {target}")
 
-    if dataset == "cubdg":
-        from neurosymbolic_da.data.cubdg import get_cubdg
+    get_ds = _get_dataset_fn(dataset)
 
-        # Combine train sets from all source domains
-        src_train_datasets = []
-        src_val_datasets = []
-        for domain in source_domains:
-            src_train_datasets.append(
-                get_cubdg(data_root, domain, train=True, image_size=image_size,
-                          strong_aug=strong_aug, randaugment=randaugment)
-            )
-            src_val_datasets.append(
-                get_cubdg(data_root, domain, train=False, image_size=image_size)
-            )
-
-        combined_train = ConcatDataset(src_train_datasets)
-        combined_val = ConcatDataset(src_val_datasets)
-
-        # Target test set (never seen during training)
-        tgt_test = get_cubdg(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            DataLoader(combined_train, shuffle=True, **kwargs),
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
+    src_train_datasets = []
+    src_val_datasets = []
+    for domain in source_domains:
+        src_train_datasets.append(
+            get_ds(data_root, domain, train=True, image_size=image_size,
+                   strong_aug=strong_aug, randaugment=randaugment)
         )
-    elif dataset == "pacs":
-        from neurosymbolic_da.data.pacs import get_pacs
-
-        src_train_datasets = []
-        src_val_datasets = []
-        for domain in source_domains:
-            src_train_datasets.append(
-                get_pacs(data_root, domain, train=True, image_size=image_size,
-                         strong_aug=strong_aug, randaugment=randaugment)
-            )
-            src_val_datasets.append(
-                get_pacs(data_root, domain, train=False, image_size=image_size)
-            )
-
-        combined_train = ConcatDataset(src_train_datasets)
-        combined_val = ConcatDataset(src_val_datasets)
-
-        tgt_test = get_pacs(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            DataLoader(combined_train, shuffle=True, **kwargs),
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
+        src_val_datasets.append(
+            get_ds(data_root, domain, train=False, image_size=image_size)
         )
 
-    elif dataset == "vlcs":
-        from neurosymbolic_da.data.vlcs import get_vlcs
+    combined_train = ConcatDataset(src_train_datasets)
+    combined_val = ConcatDataset(src_val_datasets)
+    tgt_test = get_ds(data_root, target, train=False, image_size=image_size)
 
-        src_train_datasets = []
-        src_val_datasets = []
-        for domain in source_domains:
-            src_train_datasets.append(
-                get_vlcs(data_root, domain, train=True, image_size=image_size,
-                         strong_aug=strong_aug, randaugment=randaugment)
-            )
-            src_val_datasets.append(
-                get_vlcs(data_root, domain, train=False, image_size=image_size)
-            )
-
-        combined_train = ConcatDataset(src_train_datasets)
-        combined_val = ConcatDataset(src_val_datasets)
-
-        tgt_test = get_vlcs(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            DataLoader(combined_train, shuffle=True, **kwargs),
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    elif dataset == "terrainc":
-        from neurosymbolic_da.data.terrainc import get_terra
-
-        src_train_datasets = []
-        src_val_datasets = []
-        for domain in source_domains:
-            src_train_datasets.append(
-                get_terra(data_root, domain, train=True, image_size=image_size,
-                         strong_aug=strong_aug, randaugment=randaugment)
-            )
-            src_val_datasets.append(
-                get_terra(data_root, domain, train=False, image_size=image_size)
-            )
-
-        combined_train = ConcatDataset(src_train_datasets)
-        combined_val = ConcatDataset(src_val_datasets)
-
-        tgt_test = get_terra(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            DataLoader(combined_train, shuffle=True, **kwargs),
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    elif dataset == "domainnet":
-        from neurosymbolic_da.data.domainnet import get_domainnet
-
-        src_train_datasets = []
-        src_val_datasets = []
-        for domain in source_domains:
-            src_train_datasets.append(
-                get_domainnet(data_root, domain, train=True, image_size=image_size,
-                         strong_aug=strong_aug, randaugment=randaugment)
-            )
-            src_val_datasets.append(
-                get_domainnet(data_root, domain, train=False, image_size=image_size)
-            )
-
-        combined_train = ConcatDataset(src_train_datasets)
-        combined_val = ConcatDataset(src_val_datasets)
-
-        tgt_test = get_domainnet(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            DataLoader(combined_train, shuffle=True, **kwargs),
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    else:
-        raise ValueError(f"DG protocol not implemented for dataset: {dataset}")
+    train_kw = _loader_kwargs(batch_size, num_workers, train=True)
+    eval_kw = _loader_kwargs(batch_size, num_workers, train=False)
+    return (
+        DataLoader(combined_train, shuffle=True, **train_kw),
+        DataLoader(combined_val, shuffle=False, **eval_kw),
+        DataLoader(tgt_test, shuffle=False, **eval_kw),
+    )
 
 
 def get_dg_per_domain_loaders(
@@ -225,148 +135,31 @@ def get_dg_per_domain_loaders(
     domains = DATASET_DOMAINS[dataset]
     source_domains = [d for d in domains if d != target]
 
-    if dataset == "cubdg":
-        from neurosymbolic_da.data.cubdg import get_cubdg
+    get_ds = _get_dataset_fn(dataset)
+    train_kw = _loader_kwargs(batch_size, num_workers, train=True)
+    eval_kw = _loader_kwargs(batch_size, num_workers, train=False)
 
-        domain_train_loaders = []
-        val_datasets = []
-        for domain in source_domains:
-            train_ds = get_cubdg(data_root, domain, train=True,
-                                 image_size=image_size, strong_aug=strong_aug,
-                                 randaugment=randaugment)
-            val_ds = get_cubdg(data_root, domain, train=False,
-                               image_size=image_size)
-            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                          pin_memory=True)
-            domain_train_loaders.append(
-                DataLoader(train_ds, shuffle=True, **kwargs)
-            )
-            val_datasets.append(val_ds)
-
-        combined_val = ConcatDataset(val_datasets)
-        tgt_test = get_cubdg(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            domain_train_loaders,
-            source_domains,
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
+    domain_train_loaders = []
+    val_datasets = []
+    for domain in source_domains:
+        train_ds = get_ds(data_root, domain, train=True,
+                          image_size=image_size, strong_aug=strong_aug,
+                          randaugment=randaugment)
+        val_ds = get_ds(data_root, domain, train=False, image_size=image_size)
+        domain_train_loaders.append(
+            DataLoader(train_ds, shuffle=True, **train_kw)
         )
-    elif dataset == "pacs":
-        from neurosymbolic_da.data.pacs import get_pacs
+        val_datasets.append(val_ds)
 
-        domain_train_loaders = []
-        val_datasets = []
-        for domain in source_domains:
-            train_ds = get_pacs(data_root, domain, train=True,
-                                image_size=image_size, strong_aug=strong_aug,
-                                randaugment=randaugment)
-            val_ds = get_pacs(data_root, domain, train=False,
-                              image_size=image_size)
-            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                          pin_memory=True)
-            domain_train_loaders.append(
-                DataLoader(train_ds, shuffle=True, **kwargs)
-            )
-            val_datasets.append(val_ds)
+    combined_val = ConcatDataset(val_datasets)
+    tgt_test = get_ds(data_root, target, train=False, image_size=image_size)
 
-        combined_val = ConcatDataset(val_datasets)
-        tgt_test = get_pacs(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            domain_train_loaders,
-            source_domains,
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    elif dataset == "vlcs":
-        from neurosymbolic_da.data.vlcs import get_vlcs
-
-        domain_train_loaders = []
-        val_datasets = []
-        for domain in source_domains:
-            train_ds = get_vlcs(data_root, domain, train=True,
-                                image_size=image_size, strong_aug=strong_aug,
-                                randaugment=randaugment)
-            val_ds = get_vlcs(data_root, domain, train=False,
-                              image_size=image_size)
-            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                          pin_memory=True)
-            domain_train_loaders.append(
-                DataLoader(train_ds, shuffle=True, **kwargs)
-            )
-            val_datasets.append(val_ds)
-
-        combined_val = ConcatDataset(val_datasets)
-        tgt_test = get_vlcs(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            domain_train_loaders,
-            source_domains,
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    elif dataset == "terrainc":
-        from neurosymbolic_da.data.terrainc import get_terra
-
-        domain_train_loaders = []
-        val_datasets = []
-        for domain in source_domains:
-            train_ds = get_terra(data_root, domain, train=True,
-                                image_size=image_size, strong_aug=strong_aug,
-                                randaugment=randaugment)
-            val_ds = get_terra(data_root, domain, train=False,
-                              image_size=image_size)
-            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                          pin_memory=True)
-            domain_train_loaders.append(
-                DataLoader(train_ds, shuffle=True, **kwargs)
-            )
-            val_datasets.append(val_ds)
-
-        combined_val = ConcatDataset(val_datasets)
-        tgt_test = get_terra(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            domain_train_loaders,
-            source_domains,
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    elif dataset == "domainnet":
-        from neurosymbolic_da.data.domainnet import get_domainnet
-
-        domain_train_loaders = []
-        val_datasets = []
-        for domain in source_domains:
-            train_ds = get_domainnet(data_root, domain, train=True,
-                                image_size=image_size, strong_aug=strong_aug,
-                                randaugment=randaugment)
-            val_ds = get_domainnet(data_root, domain, train=False,
-                              image_size=image_size)
-            kwargs = dict(batch_size=batch_size, num_workers=num_workers,
-                          pin_memory=True)
-            domain_train_loaders.append(
-                DataLoader(train_ds, shuffle=True, **kwargs)
-            )
-            val_datasets.append(val_ds)
-
-        combined_val = ConcatDataset(val_datasets)
-        tgt_test = get_domainnet(data_root, target, train=False, image_size=image_size)
-
-        kwargs = dict(batch_size=batch_size, num_workers=num_workers, pin_memory=True)
-        return (
-            domain_train_loaders,
-            source_domains,
-            DataLoader(combined_val, shuffle=False, **kwargs),
-            DataLoader(tgt_test, shuffle=False, **kwargs),
-        )
-    else:
-        raise ValueError(f"DG protocol not implemented for dataset: {dataset}")
+    return (
+        domain_train_loaders,
+        source_domains,
+        DataLoader(combined_val, shuffle=False, **eval_kw),
+        DataLoader(tgt_test, shuffle=False, **eval_kw),
+    )
 
 
 def dg_adversarial_epoch(
@@ -380,6 +173,7 @@ def dg_adversarial_epoch(
     lambda_adv: float = 1.0,
     align_level: str = "backbone",
     grammar_l1: float = 0.0,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> tuple[float, float]:
     """One epoch of DG training with 3-way adversarial alignment.
 
@@ -399,6 +193,9 @@ def dg_adversarial_epoch(
     iters = [iter(loader) for loader in domain_loaders]
     n_domains = len(domain_loaders)
 
+    use_amp = scaler is not None
+    autocast_ctx = torch.amp.autocast("cuda", enabled=use_amp)
+
     # Iterate until shortest domain is exhausted
     exhausted = False
     while not exhausted:
@@ -410,8 +207,8 @@ def dg_adversarial_epoch(
             except StopIteration:
                 exhausted = True
                 break
-            domain_xs.append(batch[0].to(device))
-            domain_ys.append(batch[1].to(device))
+            domain_xs.append(batch[0].to(device, non_blocking=True))
+            domain_ys.append(batch[1].to(device, non_blocking=True))
 
         if exhausted:
             break
@@ -422,67 +219,56 @@ def dg_adversarial_epoch(
         get_feats = (model.get_backbone_features if align_level == "backbone"
                      else model.get_bottleneck_features)
 
-        with torch.no_grad():
-            all_feats = []
-            all_domain_labels = []
-            for i, x in enumerate(domain_xs):
-                feats = get_feats(x)
-                all_feats.append(feats)
-                all_domain_labels.append(
-                    torch.full((feats.size(0),), i, dtype=torch.long, device=device)
-                )
+        # Concatenate all domains for a single forward pass
+        all_x = torch.cat(domain_xs, dim=0)
+        all_y = torch.cat(domain_ys, dim=0)
+        domain_labels_all = torch.cat([
+            torch.full((domain_xs[i].size(0),), i, dtype=torch.long, device=device)
+            for i in range(n_domains)
+        ], dim=0)
 
-        disc_input = torch.cat(all_feats, dim=0)
-        disc_labels = torch.cat(all_domain_labels, dim=0)
-        disc_logits = discriminator(disc_input)
-        l_disc = ce(disc_logits, disc_labels)
-        l_disc.backward()
-        optimizer_disc.step()
+        with torch.no_grad(), autocast_ctx:
+            disc_feats = get_feats(all_x)
+        disc_logits = discriminator(disc_feats)
+        l_disc = ce(disc_logits, domain_labels_all)
+        if use_amp:
+            scaler.scale(l_disc).backward()
+            scaler.step(optimizer_disc)
+        else:
+            l_disc.backward()
+            optimizer_disc.step()
 
         # ---- Step 2: Update model (task + adversarial) ----
         optimizer.zero_grad()
 
-        all_feats = []
-        all_domain_labels = []
-        l_task_total = 0.0
-        batch_correct = 0
-        batch_samples = 0
+        with autocast_ctx:
+            log_probs = model(all_x)
+            l_task_avg = nn.functional.nll_loss(log_probs, all_y)
 
-        for i, (x, y) in enumerate(zip(domain_xs, domain_ys)):
-            log_probs = model(x)
-            l_task = nn.functional.nll_loss(log_probs, y)
-            l_task_total += l_task
+            # Get features for adversarial loss
+            feats_all = get_feats(all_x)
+            feats_reversed = grl(feats_all)
+            disc_logits = discriminator(feats_reversed)
+            l_adv = ce(disc_logits, domain_labels_all)
 
-            # Track accuracy
-            preds = log_probs.argmax(dim=-1)
-            batch_correct += (preds == y).sum().item()
-            batch_samples += y.size(0)
+            loss = l_task_avg + lambda_adv * l_adv
 
-            feats = get_feats(x)
-            all_feats.append(feats)
-            all_domain_labels.append(
-                torch.full((feats.size(0),), i, dtype=torch.long, device=device)
-            )
+            # Grammar L1 sparsity
+            if grammar_l1 > 0 and hasattr(model, 'grammar'):
+                l1 = model.grammar.log_weights.abs().mean()
+                loss = loss + grammar_l1 * l1
 
-        # Average task loss across domains
-        l_task_avg = l_task_total / n_domains
+        preds = log_probs.argmax(dim=-1)
+        batch_correct = (preds == all_y).sum().item()
+        batch_samples = all_y.size(0)
 
-        # Adversarial loss: fool K-way domain discriminator
-        feats_all = torch.cat(all_feats, dim=0)
-        domain_labels_all = torch.cat(all_domain_labels, dim=0)
-        feats_reversed = grl(feats_all)
-        disc_logits = discriminator(feats_reversed)
-        l_adv = ce(disc_logits, domain_labels_all)
-
-        loss = l_task_avg + lambda_adv * l_adv
-
-        # Grammar L1 sparsity
-        if grammar_l1 > 0 and hasattr(model, 'grammar'):
-            l1 = model.grammar.log_weights.abs().mean()
-            loss = loss + grammar_l1 * l1
-
-        loss.backward()
-        optimizer.step()
+        if use_amp:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         total_loss += loss.item()
         total_correct += batch_correct
@@ -548,6 +334,16 @@ def main():
                         choices=["bottleneck", "backbone"],
                         help="Feature level for domain discriminator")
 
+    # Performance
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True,
+                        help="Automatic mixed precision (default: enabled, use --no-amp to disable)")
+    parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True,
+                        help="torch.compile for graph optimization (default: on, use --no-compile to disable)")
+    parser.add_argument("--micro-batch-size", type=int, default=None,
+                        help="Micro-batch size for gradient accumulation. "
+                             "If smaller than --batch-size, accumulates gradients. "
+                             "Default: auto-detect based on GPU memory.")
+
     # Production score alignment (MMD between source domains)
     parser.add_argument("--align-productions", action="store_true",
                         help="Add MMD loss on production scores across source domains")
@@ -608,8 +404,38 @@ def main():
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
 
+    # torch.compile for graph-mode optimization
+    if args.compile:
+        model = torch.compile(model)
+        print("Model compiled with torch.compile")
+
+    # AMP setup
+    use_amp = args.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp) if use_amp else None
+
+    # Gradient accumulation: auto-detect micro-batch size if needed
+    micro_bs = args.micro_batch_size
+    if micro_bs is None:
+        if device.type == "cuda":
+            gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            # Empirical from profiling (ResNet-50, 224x224, forward+backward):
+            #   AMP: ~0.055 GB/image, fp32: ~0.09 GB/image
+            mb_per_img = 0.055 if use_amp else 0.09
+            # Reserve 3GB for model weights, optimizer states, and overhead
+            max_micro = int((gpu_mem_gb - 3.0) / mb_per_img)
+            micro_bs = min(args.batch_size, max(16, max_micro))
+        else:
+            micro_bs = args.batch_size
+    micro_bs = min(micro_bs, args.batch_size)
+    # Use ceiling division so accum_steps * micro_bs >= batch_size
+    accum_steps = (args.batch_size + micro_bs - 1) // micro_bs
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {n_params:,}")
+    if use_amp:
+        print("Automatic mixed precision: enabled")
+    if accum_steps > 1:
+        print(f"Gradient accumulation: {accum_steps} steps (micro-batch={micro_bs})")
 
     if args.adversarial:
         # ---- Adversarial DG mode ----
@@ -676,6 +502,7 @@ def main():
                 lambda_adv=args.lambda_adv,
                 align_level=args.align_level,
                 grammar_l1=args.grammar_l1,
+                scaler=scaler,
             )
 
             val_loss, val_acc = evaluate(model, val_loader, device)
@@ -729,6 +556,7 @@ def main():
         print(f"Domain reg lambda: {args.lambda_domain_reg}")
 
         model.to(device)
+        use_amp = scaler is not None
         save_path = (
             args.save_path
             or f"checkpoints/dg_domcond_pcfg_{args.dataset}_{args.target}.pt"
@@ -755,8 +583,8 @@ def main():
                     except StopIteration:
                         domain_iters[di] = iter(domain_loaders[di])
                         bx, by = next(domain_iters[di])
-                    domain_xs.append(bx.to(device))
-                    domain_ys.append(by.to(device))
+                    domain_xs.append(bx.to(device, non_blocking=True))
+                    domain_ys.append(by.to(device, non_blocking=True))
                     domain_id_tensors.append(
                         torch.full((bx.size(0),), di, dtype=torch.long, device=device)
                     )
@@ -767,28 +595,34 @@ def main():
 
                 optimizer.zero_grad()
 
-                log_probs = model(all_x, domain_ids=all_domain_ids)
-                if args.label_smoothing > 0:
-                    n_cls = log_probs.size(-1)
-                    smooth_targets = torch.full_like(log_probs, args.label_smoothing / n_cls)
-                    smooth_targets.scatter_(1, all_y.unsqueeze(1),
-                                            1.0 - args.label_smoothing + args.label_smoothing / n_cls)
-                    cls_loss = -(smooth_targets * log_probs).sum(dim=-1).mean()
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    log_probs = model(all_x, domain_ids=all_domain_ids)
+                    if args.label_smoothing > 0:
+                        n_cls = log_probs.size(-1)
+                        smooth_targets = torch.full_like(log_probs, args.label_smoothing / n_cls)
+                        smooth_targets.scatter_(1, all_y.unsqueeze(1),
+                                                1.0 - args.label_smoothing + args.label_smoothing / n_cls)
+                        cls_loss = -(smooth_targets * log_probs).sum(dim=-1).mean()
+                    else:
+                        cls_loss = nn.functional.nll_loss(log_probs, all_y)
+
+                    loss = cls_loss
+
+                    if args.grammar_l1 > 0:
+                        loss = loss + args.grammar_l1 * model.grammar.log_weights.abs().mean()
+
+                    # L2 regularization on domain offsets
+                    if args.lambda_domain_reg > 0:
+                        domain_reg = model.grammar.domain_proj.weight.pow(2).mean()
+                        loss = loss + args.lambda_domain_reg * domain_reg
+
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
                 else:
-                    cls_loss = nn.functional.nll_loss(log_probs, all_y)
-
-                loss = cls_loss
-
-                if args.grammar_l1 > 0:
-                    loss = loss + args.grammar_l1 * model.grammar.log_weights.abs().mean()
-
-                # L2 regularization on domain offsets
-                if args.lambda_domain_reg > 0:
-                    domain_reg = model.grammar.domain_proj.weight.pow(2).mean()
-                    loss = loss + args.lambda_domain_reg * domain_reg
-
-                loss.backward()
-                optimizer.step()
+                    loss.backward()
+                    optimizer.step()
 
                 bs = all_x.size(0)
                 total_loss += loss.item() * bs
@@ -850,6 +684,7 @@ def main():
         print(f"Production alignment lambda: {args.lambda_align}")
 
         model.to(device)
+        use_amp = scaler is not None
         save_path = (
             args.save_path
             or f"checkpoints/dg_align_pcfg_{args.dataset}_{args.target}.pt"
@@ -879,8 +714,8 @@ def main():
                     except StopIteration:
                         domain_iters[di] = iter(domain_loaders[di])
                         bx, by = next(domain_iters[di])
-                    domain_xs.append(bx.to(device))
-                    domain_ys.append(by.to(device))
+                    domain_xs.append(bx.to(device, non_blocking=True))
+                    domain_ys.append(by.to(device, non_blocking=True))
 
                 # Concatenate for classification loss
                 all_x = torch.cat(domain_xs, dim=0)
@@ -888,37 +723,44 @@ def main():
 
                 optimizer.zero_grad()
 
-                # Classification loss
-                log_probs = model(all_x)
-                if args.label_smoothing > 0:
-                    n_cls = log_probs.size(-1)
-                    smooth_targets = torch.full_like(log_probs, args.label_smoothing / n_cls)
-                    smooth_targets.scatter_(1, all_y.unsqueeze(1),
-                                            1.0 - args.label_smoothing + args.label_smoothing / n_cls)
-                    cls_loss = -(smooth_targets * log_probs).sum(dim=-1).mean()
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    # Classification loss
+                    log_probs = model(all_x)
+                    if args.label_smoothing > 0:
+                        n_cls = log_probs.size(-1)
+                        smooth_targets = torch.full_like(log_probs, args.label_smoothing / n_cls)
+                        smooth_targets.scatter_(1, all_y.unsqueeze(1),
+                                                1.0 - args.label_smoothing + args.label_smoothing / n_cls)
+                        cls_loss = -(smooth_targets * log_probs).sum(dim=-1).mean()
+                    else:
+                        cls_loss = nn.functional.nll_loss(log_probs, all_y)
+
+                    if args.grammar_l1 > 0:
+                        cls_loss = cls_loss + args.grammar_l1 * model.grammar.log_weights.abs().mean()
+
+                    # Production score alignment: single pass on concatenated input,
+                    # then split by domain sizes (avoids re-running backbone per domain)
+                    all_prod_scores = model.get_production_scores(all_x)
+                    domain_prod_scores = all_prod_scores.split(
+                        [dx.size(0) for dx in domain_xs], dim=0
+                    )
+
+                    align_loss = torch.tensor(0.0, device=device)
+                    for i in range(n_domains):
+                        for j in range(i + 1, n_domains):
+                            align_loss = align_loss + mmd_loss(
+                                domain_prod_scores[i], domain_prod_scores[j]
+                            )
+
+                    loss = cls_loss + args.lambda_align * align_loss
+
+                if use_amp:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
                 else:
-                    cls_loss = nn.functional.nll_loss(log_probs, all_y)
-
-                if args.grammar_l1 > 0:
-                    cls_loss = cls_loss + args.grammar_l1 * model.grammar.log_weights.abs().mean()
-
-                # Production score alignment: MMD between all domain pairs
-                align_loss = torch.tensor(0.0, device=device)
-                domain_prod_scores = []
-                offset = 0
-                for dx in domain_xs:
-                    ps = model.get_production_scores(dx)
-                    domain_prod_scores.append(ps)
-
-                for i in range(n_domains):
-                    for j in range(i + 1, n_domains):
-                        align_loss = align_loss + mmd_loss(
-                            domain_prod_scores[i], domain_prod_scores[j]
-                        )
-
-                loss = cls_loss + args.lambda_align * align_loss
-                loss.backward()
-                optimizer.step()
+                    loss.backward()
+                    optimizer.step()
 
                 bs = all_x.size(0)
                 total_loss += loss.item() * bs
@@ -964,10 +806,11 @@ def main():
 
     else:
         # ---- ERM mode (simple concatenation) ----
+        # Use micro_bs for DataLoader to support gradient accumulation
         src_train, src_val, tgt_test = get_dg_loaders(
             args.dataset, args.target,
             data_root=args.data_root,
-            batch_size=args.batch_size,
+            batch_size=micro_bs,
             num_workers=args.num_workers,
             strong_aug=args.strong_aug,
             randaugment=args.randaugment,
@@ -1002,6 +845,8 @@ def main():
             save_path=save_path,
             grammar_l1=args.grammar_l1,
             label_smoothing=args.label_smoothing,
+            scaler=scaler,
+            accum_steps=accum_steps,
         )
 
         # Final evaluation on held-out target (zero-shot)
